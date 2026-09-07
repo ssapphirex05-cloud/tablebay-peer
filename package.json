@@ -1,8 +1,8 @@
 {
   "name": "tablebay-peer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "PeerJS signaling for Tablebay",
+  "description": "Tablebay lobby and world relay",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,6 +12,6 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "peer": "^1.0.2"
+    "ws": "^8.18.0"
   }
 }
