@@ -1,8 +1,8 @@
 {
   "name": "tablebay-peer",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Tablebay lobby and world relay",
+  "description": "Tablebay room relay (WebSocket)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
