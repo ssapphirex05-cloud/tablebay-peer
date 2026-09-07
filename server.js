@@ -31,7 +31,9 @@ function send(ws, obj) {
 
 function rosterOf(L) {
   const r = {};
-  L.players.forEach((p) => { r[p.key] = p; });
+  L.players.forEach((p, i) => {
+    r[p.key] = Object.assign({}, p, { order: i, admin: i === 0 || !!p.admin });
+  });
   return r;
 }
 
@@ -51,13 +53,19 @@ function closeLobby(code, reason) {
 function dropClient(ws) {
   const L = ws.lobby;
   if (!L) return;
+  const gone = L.players.find((p) => p.key === ws.playerKey);
   L.clients.delete(ws);
   L.players = L.players.filter((p) => p.key !== ws.playerKey);
   if (ws === L.hostWs) {
     closeLobby(L.code, 'Хост вышел');
     return;
   }
-  broadcast(L, { typ: 'presence', roster: rosterOf(L) });
+  broadcast(L, {
+    typ: 'peerLeft',
+    key: ws.playerKey,
+    name: (gone && gone.name) || 'Игрок',
+    roster: rosterOf(L)
+  });
 }
 
 app.get('/', (_req, res) => {
@@ -103,7 +111,10 @@ wss.on('connection', (ws) => {
         send(ws, { typ: 'error', text: 'Код занят, попробуй ещё раз' });
         return;
       }
-      const player = msg.player || { key: 'host', name: msg.name || 'Хост' };
+      const player = Object.assign({ key: 'host', name: msg.name || 'Хост' }, msg.player || {});
+      player.admin = true;
+      player.joinAt = Date.now();
+      player.order = 0;
       const L = {
         code,
         name: msg.name || ('Стол ' + code),
@@ -135,7 +146,10 @@ wss.on('connection', (ws) => {
         send(ws, { typ: 'error', text: 'Лобби полное' });
         return;
       }
-      const player = msg.player || { key: 'g' + Date.now(), name: 'Гость' };
+      const player = Object.assign({ key: 'g' + Date.now(), name: 'Гость' }, msg.player || {});
+      player.admin = false;
+      player.joinAt = Date.now();
+      player.order = L.players.length;
       L.players = L.players.filter((p) => p.key !== player.key);
       L.players.push(player);
       L.clients.add(ws);
@@ -149,8 +163,7 @@ wss.on('connection', (ws) => {
         world: L.lastWorld,
         preset: L.preset
       });
-      broadcast(L, { typ: 'presence', roster: rosterOf(L), player }, ws);
-      send(L.hostWs, { typ: 'guestIn', player });
+      broadcast(L, { typ: 'peerJoin', player: player, roster: rosterOf(L) }, ws);
       return;
     }
 
