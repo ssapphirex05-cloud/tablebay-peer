@@ -160,7 +160,7 @@ function ensureAcc(uid, extra) {
 }
 function publicAcc(a) {
   if (!a) return null;
-  return { uid: a.uid, name: a.name, tg: !!a.tgId, tgName: a.tgName || '' };
+  return { uid: a.uid, name: a.name, tg: !!a.tgId, tgName: a.tgName || '', avatar: a.avatar || '' };
 }
 
 app.post('/account', (req, res) => {
@@ -205,15 +205,23 @@ app.post('/friends/accept', (req, res) => {
 });
 
 app.get('/tg/link', (req, res) => {
-  const uid = String(req.query.uid || '');
+  const uid = String(req.query.uid || ('tg' + crypto.randomBytes(5).toString('hex')));
   const name = String(req.query.name || '').slice(0, 24);
-  const acc = ensureAcc(uid, name ? { name } : null);
-  if (!acc) return res.status(400).json({ error: 'uid' });
   if (!TG_BOT_NAME) return res.json({ ok: false, needBot: true, hint: 'Задай TG_BOT_NAME и TG_BOT_TOKEN на Render' });
   const token = crypto.randomBytes(6).toString('hex');
-  bindTokens.set(token, { uid: acc.uid, name: acc.name, exp: Date.now() + 12 * 60 * 1000 });
-  saveAccounts();
-  res.json({ ok: true, url: 'https://t.me/' + TG_BOT_NAME + '?start=bind' + token });
+  bindTokens.set(token, {
+    uid, name, ready: false, me: null,
+    exp: Date.now() + 12 * 60 * 1000
+  });
+  res.json({ ok: true, token, url: 'https://t.me/' + TG_BOT_NAME + '?start=bind' + token });
+});
+app.get('/tg/status', (req, res) => {
+  const token = String(req.query.token || '');
+  const rec = bindTokens.get(token);
+  if (!rec) return res.json({ ok: false, waiting: true, dead: true });
+  if (rec.exp < Date.now()) return res.json({ ok: false, waiting: true, dead: true });
+  if (rec.ready && rec.me) return res.json({ ok: true, waiting: false, me: rec.me });
+  res.json({ ok: true, waiting: true });
 });
 
 async function tgSend(chatId, text) {
@@ -240,17 +248,29 @@ app.post('/tg', express.json(), (req, res) => {
       const token = payload.slice(4);
       const rec = bindTokens.get(token);
       if (!rec || rec.exp < Date.now()) {
-        tgSend(chatId, 'Код устарел. Нажми «Привязать Telegram» ещё раз в игре.');
+        tgSend(chatId, 'Код устарел. Нажми вход через Telegram ещё раз в игре.');
         return;
       }
-      bindTokens.delete(token);
-      const acc = ensureAcc(rec.uid, rec.name ? { name: rec.name } : null);
-      if (rec.name) acc.name = String(rec.name).slice(0, 24);
-      acc.tgId = String(from.id);
-      acc.tgName = from.username ? ('@' + from.username) : ((from.first_name || '') + '').slice(0, 24);
-      tgIndex.set(acc.tgId, acc.uid);
+      const tgId = String(from.id);
+      const tgName = from.username ? ('@' + from.username) : ((from.first_name || '') + '').slice(0, 24);
+      const existingUid = tgIndex.get(tgId);
+      let acc;
+      if (existingUid && accounts.get(existingUid)) {
+        acc = accounts.get(existingUid);
+        if (rec.name && rec.name !== 'Игрок') acc.name = String(rec.name).slice(0, 24);
+      } else {
+        acc = ensureAcc(rec.uid || ('tg' + crypto.randomBytes(5).toString('hex')), rec.name ? { name: rec.name } : null);
+        if (rec.name) acc.name = String(rec.name).slice(0, 24);
+        else if (!acc.name || acc.name === 'Игрок') acc.name = (from.first_name || tgName || 'Игрок').slice(0, 24);
+      }
+      acc.tgId = tgId;
+      acc.tgName = tgName;
+      tgIndex.set(tgId, acc.uid);
+      rec.ready = true;
+      rec.me = publicAcc(acc);
+      rec.exp = Date.now() + 12 * 60 * 1000;
       saveAccounts();
-      tgSend(chatId, 'Tablebay: аккаунт «' + acc.name + '» связан с ' + (acc.tgName || 'Telegram') + '. Не жми голый /start — вход только кнопкой из игры.');
+      tgSend(chatId, 'Вход: «' + acc.name + '» (' + tgName + '). Вернись в игру — профиль сам станет этим аккаунтом.');
       return;
     }
     const known = from.id && tgIndex.get(String(from.id));
