@@ -3,6 +3,8 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = Number(process.env.PORT) || 9000;
 const MAX_PLAYERS = 8;
@@ -11,6 +13,7 @@ const STALE_MS = 90_000;
 const EMPTY_MS = 20 * 60_000;
 
 const app = express();
+app.use(express.json({ limit: '200kb' }));
 app.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
@@ -107,6 +110,149 @@ function dropClient(ws, reason) {
 app.get('/', (_req, res) => {
   res.type('text/plain').send('Tablebay rooms ok');
 });
+
+const DATA_FILE = process.env.TB_DATA || path.join(__dirname, 'tb-accounts.json');
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || '';
+const TG_BOT_NAME = process.env.TG_BOT_NAME || '';
+
+const accounts = new Map();
+const tgIndex = new Map();
+const bindTokens = new Map();
+
+function loadAccounts() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    (raw.accounts || []).forEach((a) => {
+      accounts.set(a.uid, {
+        uid: a.uid,
+        name: a.name || 'Игрок',
+        avatar: a.avatar || '',
+        tgId: a.tgId || '',
+        tgName: a.tgName || '',
+        friends: new Set(a.friends || []),
+        incoming: a.incoming || []
+      });
+      if (a.tgId) tgIndex.set(String(a.tgId), a.uid);
+    });
+  } catch (_) {}
+}
+function saveAccounts() {
+  try {
+    const list = [...accounts.values()].map((a) => ({
+      uid: a.uid, name: a.name, avatar: a.avatar, tgId: a.tgId, tgName: a.tgName,
+      friends: [...a.friends], incoming: a.incoming || []
+    }));
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ accounts: list }));
+  } catch (e) { console.warn('save accounts', e.message); }
+}
+loadAccounts();
+
+function ensureAcc(uid, extra) {
+  uid = String(uid || '').slice(0, 40);
+  if (!uid) return null;
+  if (!accounts.has(uid)) accounts.set(uid, { uid, name: 'Игрок', avatar: '', tgId: '', tgName: '', friends: new Set(), incoming: [] });
+  const a = accounts.get(uid);
+  if (extra) {
+    if (extra.name) a.name = String(extra.name).slice(0, 24);
+    if (extra.avatar != null) a.avatar = String(extra.avatar).slice(0, 8000);
+  }
+  return a;
+}
+function publicAcc(a) {
+  if (!a) return null;
+  return { uid: a.uid, name: a.name, tg: !!a.tgId, tgName: a.tgName || '' };
+}
+
+app.post('/account', (req, res) => {
+  const a = ensureAcc(req.body && req.body.uid, req.body || {});
+  if (!a) return res.status(400).json({ error: 'uid' });
+  saveAccounts();
+  res.json({ ok: true, me: publicAcc(a), friends: [...a.friends].map((id) => publicAcc(accounts.get(id))).filter(Boolean), incoming: a.incoming || [] });
+});
+app.get('/friends', (req, res) => {
+  const a = ensureAcc(req.query.uid);
+  if (!a) return res.status(400).json({ error: 'uid' });
+  res.json({
+    me: publicAcc(a),
+    friends: [...a.friends].map((id) => publicAcc(accounts.get(id))).filter(Boolean),
+    incoming: a.incoming || []
+  });
+});
+app.post('/friends/add', (req, res) => {
+  const from = ensureAcc(req.body && req.body.uid, req.body || {});
+  const toUid = String((req.body && req.body.to) || '');
+  const to = ensureAcc(toUid);
+  if (!from || !to || from.uid === to.uid) return res.status(400).json({ error: 'bad' });
+  from.friends.add(to.uid);
+  if (!to.friends.has(from.uid)) {
+    to.incoming = to.incoming || [];
+    if (!to.incoming.some((x) => x.uid === from.uid)) {
+      to.incoming.push({ uid: from.uid, name: from.name, at: Date.now() });
+    }
+  }
+  saveAccounts();
+  res.json({ ok: true });
+});
+app.post('/friends/accept', (req, res) => {
+  const me = ensureAcc(req.body && req.body.uid);
+  const other = ensureAcc(req.body && req.body.from);
+  if (!me || !other) return res.status(400).json({ error: 'bad' });
+  me.friends.add(other.uid);
+  other.friends.add(me.uid);
+  me.incoming = (me.incoming || []).filter((x) => x.uid !== other.uid);
+  saveAccounts();
+  res.json({ ok: true });
+});
+
+app.get('/tg/link', (req, res) => {
+  const uid = String(req.query.uid || '');
+  if (!ensureAcc(uid)) return res.status(400).json({ error: 'uid' });
+  if (!TG_BOT_NAME) return res.json({ ok: false, needBot: true, hint: 'Задай TG_BOT_NAME и TG_BOT_TOKEN на Render' });
+  const token = crypto.randomBytes(6).toString('hex');
+  bindTokens.set(token, { uid, exp: Date.now() + 12 * 60 * 1000 });
+  res.json({ ok: true, url: 'https://t.me/' + TG_BOT_NAME + '?start=bind' + token });
+});
+
+async function tgSend(chatId, text) {
+  if (!TG_BOT_TOKEN) return;
+  try {
+    await fetch('https://api.telegram.org/bot' + TG_BOT_TOKEN + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text })
+    });
+  } catch (_) {}
+}
+
+app.post('/tg', (req, res) => {
+  res.json({ ok: true });
+  const msg = req.body && req.body.message;
+  if (!msg || !msg.text) return;
+  const chatId = msg.chat && msg.chat.id;
+  const text = String(msg.text || '');
+  const from = msg.from || {};
+  if (text.startsWith('/start')) {
+    const payload = text.replace('/start', '').trim();
+    if (payload.startsWith('bind')) {
+      const token = payload.slice(4);
+      const rec = bindTokens.get(token);
+      if (!rec || rec.exp < Date.now()) {
+        tgSend(chatId, 'Код устарел. Нажми «Привязать Telegram» ещё раз в игре.');
+        return;
+      }
+      bindTokens.delete(token);
+      const acc = ensureAcc(rec.uid);
+      acc.tgId = String(from.id);
+      acc.tgName = from.username ? ('@' + from.username) : String(from.first_name || '').slice(0, 24);
+      tgIndex.set(acc.tgId, acc.uid);
+      saveAccounts();
+      tgSend(chatId, 'Tablebay: аккаунт привязан как ' + acc.name);
+      return;
+    }
+    tgSend(chatId, 'Это бот Tablebay. Привязка: кнопка в профиле игры.');
+  }
+});
+
 app.get('/health', (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, ts: Date.now() });
 });
