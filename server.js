@@ -178,11 +178,6 @@ app.post('/tg', express.json(), (req, res) => {
       const existed = !!(existingUid && accounts.get(existingUid));
       rec.ready = true;
       rec.exp = Date.now() + 12 * 60 * 1000;
-      if (rec.mode === 'login' && !existed) {
-        rec.error = 'not_registered';
-        rec.hint = 'Этот Telegram ещё не зарегистрирован. В игре нажми «Регистрация».';
-        rec.me = null; tgSend(chatId, rec.hint); return;
-      }
       if (rec.mode === 'register' && existed) {
         const acc = accounts.get(existingUid);
         if (rec.avatar && !acc.avatar) acc.avatar = String(rec.avatar).slice(0, 400000);
